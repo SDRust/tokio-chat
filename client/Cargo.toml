@@ -1,0 +1,6 @@
+[package]
+name = "tokio_chat_client"
+version = "0.1.0"
+authors = ["Daniel Norman <daniel@gudtech.com>"]
+
+[dependencies]
