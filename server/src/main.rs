@@ -1,43 +1,38 @@
-extern crate tokio_chat_common;
+// A tiny async echo server with tokio-core
+
 extern crate futures;
 extern crate tokio_core;
-extern crate tokio_proto;
-extern crate tokio_service;
-extern crate native_tls;
-extern crate tokio_tls;
 
-use native_tls::{Pkcs12};
-
+use futures::{Future, Stream};
+use tokio_core::io::{copy, Io};
+use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
-use tokio_core::net::{TcpListener};
-use tokio_tls::{TlsConnectorExt, TlsAcceptorExt};
-
-use native_tls::TlsAcceptor;
-
-use std::sync::Arc;
-use std::fs::File;
-use std::io::{Read};
-//use std::net::{TcpStream, TcpListener};
 
 fn main() {
+    // Create the event loop that will drive this server
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
-    let mut file = File::open("../key_and_cert.p12").unwrap();
-    let mut pkcs12 = vec![];
-    file.read_to_end(&mut pkcs12).unwrap();
-    let pkcs12 = Pkcs12::from_der(&pkcs12, "hunter2").unwrap();
+    // Bind the server's socket
+    let addr = "0.0.0.0:1337".parse().unwrap();
+    let sock = TcpListener::bind(&addr, &handle).unwrap();
 
-    let acceptor = TlsAcceptor::builder(pkcs12).unwrap().build().unwrap();
-    let acceptor = Arc::new(acceptor);
+    // Pull out a stream of sockets for incoming connections
+    let server = sock.incoming().for_each(|(sock, _)| {
+        // Split up the reading and writing parts of the
+        // socket
+        let (reader, writer) = sock.split();
 
-    let server = TcpListener::bind(&("0.0.0.0:1337".parse().unwrap()), &handle).unwrap();
+        let mut buf = vec![0; 1024 * 8];
+        reader.try_read(&buf).unwrap();
 
-/*    let listener = TcpListener::bind("0.0.0.0:1337").unwrap();
-    let socket = listener.accept();
-    acceptor.build(socket);*/
+        // Spawn the future as a concurrent task
+//        handle.spawn(handle_conn);
 
-//    let new_conn = acceptor.accept_async(listener);
+        Ok(())
 
+    });
 
+    // Spin up the server on the event loop
+    core.run(server).unwrap();
 }
