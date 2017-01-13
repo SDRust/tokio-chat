@@ -48,6 +48,6 @@ And the following commands to test the client:
 ```
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes # fill in the prompts
 openssl s_server -key key.pem -cert cert.pem -accept 1337
-openssl pkcs12 -export -inkey key.pem -in cert.pem -out key_and_cert.p12
+openssl pkcs12 -export -out identity.pfx -inkey key.pem -in cert.pem
 ```
 
