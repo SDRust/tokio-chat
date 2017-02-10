@@ -1,136 +1,133 @@
-//! An "hello world" echo server with tokio-core
+//! A chat server that broadcasts a message to all connections.
 //!
-//! This server will create a TCP listener, accept connections in a loop, and
-//! simply write back everything that's read off of each TCP connection. Each
-//! TCP connection is processed concurrently with all other TCP connections, and
-//! each connection will have its own buffer that it's reading in/out of.
+//! This is a simple line-based server which accepts connections, reads lines
+//! from those connections, and broadcasts the lines to all other connected
+//! clients. In a sense this is a bit of a "poor man's chat server".
 //!
-//! To see this server in action, you can run this in one terminal:
+//! You can test this out by running:
 //!
-//!     cargo run --example echo
+//!     cargo run --example chat
 //!
-//! and in another terminal you can run:
+//! And then in another window run:
 //!
-//!     cargo run --example connect 127.0.0.1:8080
+//!     nc -4 localhost 8080
 //!
-//! Each line you type in to the `connect` terminal should be echo'd back to
-//! you! If you open up multiple terminals running the `connect` example you
-//! should be able to see them all make progress simultaneously.
+//! You can run the second command in multiple windows and then chat between the
+//! two, seeing the messages from the other client as they're received. For all
+//! connected clients they'll all join the same room and see everyone else's
+//! messages.
 
-extern crate futures;
 extern crate tokio_core;
+extern crate futures;
 
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::iter;
 use std::env;
-use std::net::SocketAddr;
+use std::io::{Error, ErrorKind, BufReader};
 
-use futures::Future;
-use futures::stream::Stream;
-use tokio_core::io::{copy, Io};
 use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
-use std::cell::RefCell;
+use tokio_core::io::{self, Io};
 
-type ConnectionList = RefCell<Vec<tokio_core::io::WriteHalf<tokio_core::net::TcpStream>>>;
+use futures::stream::{self, Stream};
+use futures::Future;
 
 fn main() {
-    // Allow passing an address to listen on as the first argument of this
-    // program, but otherwise we'll just set up our TCP listener on
-    // 127.0.0.1:8080 for connections.
     let addr = env::args().nth(1).unwrap_or("127.0.0.1:1337".to_string());
-    let addr = addr.parse::<SocketAddr>().unwrap();
+    let addr = addr.parse().unwrap();
 
-    let connection_list : ConnectionList = RefCell::new(vec![]);
-    // First up we'll create the event loop that's going to drive this server.
-    // This is done by creating an instance of the `Core` type, tokio-core's
-    // event loop. Most functions in tokio-core return an `io::Result`, and
-    // `Core::new` is no exception. For this example, though, we're mostly just
-    // ignoring errors, so we unwrap the return value.
-    //
-    // After the event loop is created we acquire a handle to it through the
-    // `handle` method. With this handle we'll then later be able to create I/O
-    // objects and spawn futures.
+    // Create the event loop and TCP listener we'll accept connections on.
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-
-    // Next up we create a TCP listener which will listen for incoming
-    // connections. This TCP listener is bound to the address we determined
-    // above and must be associated with an event loop, so we pass in a handle
-    // to our event loop. After the socket's created we inform that we're ready
-    // to go and start accepting connections.
     let socket = TcpListener::bind(&addr, &handle).unwrap();
     println!("Listening on: {}", addr);
 
-    // Here we convert the `TcpListener` to a stream of incoming connections
-    // with the `incoming` method. We then define how to process each element in
-    // the stream with the `for_each` method.
-    //
-    // This combinator, defined on the `Stream` trait, will allow us to define a
-    // computation to happen for all items on the stream (in this case TCP
-    // connections made to the server).  The return value of the `for_each`
-    // method is itself a future representing processing the entire stream of
-    // connections, and ends up being our server.
-    let done = socket.incoming().for_each(move |(socket, addr)| {
+    // This is a single-threaded server, so we can just use Rc and RefCell to
+    // store the map of all connections we know about.
+    let connections = Rc::new(RefCell::new(HashMap::new()));
 
-        // Once we're inside this closure this represents an accepted client
-        // from our server. The `socket` is the client connection and `addr` is
-        // the remote address of the client (similar to how the standard library
-        // operates).
-        //
-        // We just want to copy all data read from the socket back onto the
-        // socket itself (e.g. "echo"). We can use the standard `io::copy`
-        // combinator in the `tokio-core` crate to do precisely this!
-        //
-        // The `copy` function takes two arguments, where to read from and where
-        // to write to. We only have one argument, though, with `socket`.
-        // Luckily there's a method, `Io::split`, which will split an Read/Write
-        // stream into its two halves. This operation allows us to work with
-        // each stream independently, such as pass them as two arguments to the
-        // `copy` function.
-        //
-        // The `copy` function then returns a future, and this future will be
-        // resolved when the copying operation is complete, resolving to the
-        // amount of data that was copied.
-        let (reader, writer) = socket.split();
+    let srv = socket.incoming().for_each(move |(stream, addr)| {
+        println!("New Connection: {}", addr);
+        let (reader, writer) = stream.split();
 
-        connection_list.borrow_mut().push(writer);
+        // Create a channel for our stream, which other sockets will use to
+        // send us messages. Then register our address with the stream to send
+        // data to us.
+        let (tx, rx) = futures::sync::mpsc::unbounded();
+        connections.borrow_mut().insert(addr, tx);
 
-        //let amt = coq(reader, writer);
+        // Define here what we do for the actual I/O. That is, read a bunch of
+        // lines from the socket and dispatch them while we also write any lines
+        // from other sockets.
+        let connections_inner = connections.clone();
+        let reader = BufReader::new(reader);
 
-        // After our copy operation is complete we just print out some helpful
-        // information.
-        let msg = amt.then(move |result| {
-            match result {
-                Ok(amt) => println!("wrote {} bytes to {}", amt, addr),
-                Err(e) => println!("error on {}: {}", addr, e),
-            }
+        // Model the read portion of this socket by mapping an infinite
+        // iterator to each line off the socket. This "loop" is then
+        // terminated with an error once we hit EOF on the socket.
+        let iter = stream::iter(iter::repeat(()).map(Ok::<(), Error>));
+        let socket_reader = iter.fold(reader, move |reader, _| {
+            // Read a line off the socket, failing if we're at EOF
+            let line = io::read_until(reader, b'\n', Vec::new());
+            let line = line.and_then(|(reader, vec)| {
+                if vec.len() == 0 {
+                    Err(Error::new(ErrorKind::BrokenPipe, "broken pipe"))
+                } else {
+                    Ok((reader, vec))
+                }
+            });
 
-            Ok(())
+            // Convert the bytes we read into a string, and then send that
+            // string to all other connected clients.
+            let line = line.map(|(reader, vec)| {
+                (reader, String::from_utf8(vec))
+            });
+            let connections = connections_inner.clone();
+            line.map(move |(reader, message)| {
+                println!("{}: {:?}", addr, message);
+                let mut conns = connections.borrow_mut();
+                if let Ok(msg) = message {
+                    // For each open connection except the sender, send the
+                    // string via the channel.
+                    let iter = conns.iter_mut()
+                                    .filter(|&(&k, _)| k != addr)
+                                    .map(|(_, v)| v);
+                    for tx in iter {
+                        tx.send(format!("{}: {}", addr, msg)).unwrap();
+                    }
+                } else {
+                    let tx = conns.get_mut(&addr).unwrap();
+                    tx.send("You didn't send valid UTF-8.".to_string()).unwrap();
+                }
+                reader
+            })
         });
 
-        // And this is where much of the magic of this server happens. We
-        // crucially want all clients to make progress concurrently, rather than
-        // blocking one on completion of another. To achieve this we use the
-        // `spawn` function on `Handle` to essentially execute some work in the
-        // background.
-        //
-        // This function will transfer ownership of the future (`msg` in this
-        // case) to the event loop that `handle` points to. The event loop will
-        // then drive the future to completion.
-        //
-        // Essentially here we're spawning a new task to run concurrently, which
-        // will allow all of our clients to be processed concurrently.
-        handle.spawn(msg);
+        // Whenever we receive a string on the Receiver, we write it to
+        // `WriteHalf<TcpStream>`.
+        let socket_writer = rx.fold(writer, |writer, msg| {
+            let amt = io::write_all(writer, msg.into_bytes());
+            let amt = amt.map(|(writer, _)| writer);
+            amt.map_err(|_| ())
+        });
+
+        // Now that we've got futures representing each half of the socket, we
+        // use the `select` combinator to wait for either half to be done to
+        // tear down the other. Then we spawn off the result.
+        let connections = connections.clone();
+        let socket_reader = socket_reader.map_err(|_| ());
+        let connection = socket_reader.map(|_| ()).select(socket_writer.map(|_| ()));
+        handle.spawn(connection.then(move |_| {
+            connections.borrow_mut().remove(&addr);
+            println!("Connection {} closed.", addr);
+            Ok(())
+        }));
 
         Ok(())
     });
 
-    // And finally now that we've define what our server is, we run it! We
-    // didn't actually do much I/O up to this point and this `Core::run` method
-    // is responsible for driving the entire server to completion.
-    //
-    // The `run` method will return the result of the future that it's running,
-    // but in our case the `done` future won't ever finish because a TCP
-    // listener is never done accepting clients. That basically just means that
-    // we're going to be running the server until it's killed (e.g. ctrl-c).
-    core.run(done).unwrap();
+    // execute server
+    core.run(srv).unwrap();
 }
