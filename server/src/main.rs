@@ -83,7 +83,7 @@ use tokio_proto::TcpServer;
 
 fn main() {
     // Specify the localhost address
-    let addr = "0.0.0.0:12345".parse().unwrap();
+    let addr = "0.0.0.0:1337".parse().unwrap();
 
     // The builder requires a protocol and an address
     let server = TcpServer::new(LineProto, addr);
