@@ -46,4 +46,8 @@ Use the following command to test the server:
 And the following commands to test the client:
 
 `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes # fill in the prompts
+openssl pkcs12 -export -inkey key.pem -in cert.pem -out key_and_cert.p12
+
 openssl s_server -key key.pem -cert cert.pem -accept 1337`
+
+
