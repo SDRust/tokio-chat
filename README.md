@@ -20,7 +20,7 @@ The user should have some mechanism to send messages to the server, and (optiona
 
 ### Team 2 - The Server
 
-The server should automatically bind to port 1337 using tokio-tls ( tls because we're not savages )
+The server should automatically bind to port 1337 using tokio.
 Messages received from one chat client should automatically be relayed to all other chat clients *excluding* the originating chat client.
 
 The server should store all messages in memory.
@@ -28,7 +28,7 @@ Upon the connection of a new client, the server should replay all messages recei
 
 ### The protocol:
 
-The client shall connect to the server using TLS on port 1337.
+The client shall connect to the server on port 1337.
 Each interaction shall be a newline-terminated JSON blob. The JSON blobs themselves may not contain any newline characters. Use JSON encoding to represent newlines in the data.
 
 Upon connecting, the client shall send a login command specifying the nickname ( see command.json )
@@ -41,13 +41,8 @@ Thereafter, either the client, or the server may send messages in either directi
 ### Testing suggestion:
 Use the following command to test the server:
 
-`openssl s_client -connect localhost:1337`
+`telnet localhost:1337`
 
 And the following commands to test the client:
 
-`openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes # fill in the prompts
-openssl pkcs12 -export -inkey key.pem -in cert.pem -out key_and_cert.p12
-
-openssl s_server -key key.pem -cert cert.pem -accept 1337`
-
-
+*TODO*
