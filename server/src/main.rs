@@ -1,38 +1,94 @@
-// A tiny async echo server with tokio-core
-
 extern crate futures;
 extern crate tokio_core;
+extern crate tokio_proto;
+extern crate tokio_service;
 
-use futures::{Future, Stream};
-use tokio_core::io::{copy, Io};
-use tokio_core::net::TcpListener;
-use tokio_core::reactor::Core;
+use std::io;
+use std::str;
+use tokio_core::io::{Codec, EasyBuf};
+
+pub struct LineCodec;
+
+impl Codec for LineCodec {
+    type In = String;
+    type Out = String;
+
+    fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
+        if let Some(i) = buf.as_slice().iter().position(|&b| b == b'\n') {
+            // remove the serialized frame from the buffer.
+            let line = buf.drain_to(i);
+
+            // Also remove the '\n'
+            buf.drain_to(1);
+
+            // Turn this data into a UTF string and return it in a Frame.
+            match str::from_utf8(line.as_slice()) {
+                Ok(s) => Ok(Some(s.to_string())),
+                Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid UTF-8")),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn encode(&mut self, msg: String, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.extend(msg.as_bytes());
+        buf.push(b'\n');
+        Ok(())
+    }
+}
+
+use tokio_proto::pipeline::ServerProto;
+
+pub struct LineProto;
+
+use tokio_core::io::{Io, Framed};
+
+impl<T: Io + 'static> ServerProto<T> for LineProto {
+    /// For this protocol style, `Request` matches the codec `In` type
+    type Request = String;
+
+    /// For this protocol style, `Response` matches the coded `Out` type
+    type Response = String;
+
+    /// A bit of boilerplate to hook in the codec:
+    type Transport = Framed<T, LineCodec>;
+    type BindTransport = Result<Self::Transport, io::Error>;
+    fn bind_transport(&self, io: T) -> Self::BindTransport {
+        Ok(io.framed(LineCodec))
+    }
+}
+
+use tokio_service::Service;
+pub struct Echo;
+use futures::{future, Future, BoxFuture};
+impl Service for Echo {
+    // These types must match the corresponding protocol types:
+    type Request = String;
+    type Response = String;
+
+    // For non-streaming protocols, service errors are always io::Error
+    type Error = io::Error;
+
+    // The future for computing the response; box it for simplicity.
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    // Produce a future for computing a response from a request.
+    fn call(&self, req: Self::Request) -> Self::Future {
+        // In this case, the response is immediate.
+        future::ok(req).boxed()
+    }
+}
+use tokio_proto::TcpServer;
 
 fn main() {
-    // Create the event loop that will drive this server
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
+    // Specify the localhost address
+    let addr = "0.0.0.0:12345".parse().unwrap();
 
-    // Bind the server's socket
-    let addr = "0.0.0.0:1337".parse().unwrap();
-    let sock = TcpListener::bind(&addr, &handle).unwrap();
+    // The builder requires a protocol and an address
+    let server = TcpServer::new(LineProto, addr);
 
-    // Pull out a stream of sockets for incoming connections
-    let server = sock.incoming().for_each(|(sock, _)| {
-        // Split up the reading and writing parts of the
-        // socket
-        let (reader, writer) = sock.split();
-
-        let mut buf = vec![0; 1024 * 8];
-        reader.try_read(&buf).unwrap();
-
-        // Spawn the future as a concurrent task
-//        handle.spawn(handle_conn);
-
-        Ok(())
-
-    });
-
-    // Spin up the server on the event loop
-    core.run(server).unwrap();
+    // We provide a way to *instantiate* the service for each new
+    // connection; here, we just immediately return a new instance.
+    server.serve(|| Ok(Echo));
 }
