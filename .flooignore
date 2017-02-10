@@ -8,3 +8,4 @@ tmp
 vendor/
 client/target/
 server/target/
+common/target/
