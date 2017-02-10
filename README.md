@@ -16,7 +16,7 @@ The client should in some fashion accept or prompt the user to specify:
 * The user's nickname
 
 Messages received from the server should be displayed on screen, including nickname, timestamp (preferably formatted) and the message.
-The user should have some mechanism to send messages to the server, and (optionally) to disconnect. Sent messages should be locally echoed, as the server will not send a clent's own messages back to it.
+The user should have some mechanism to send messages to the server, and (optionally) to disconnect. Sent messages should be locally echoed, as the server will not send a client's own messages back to it.
 
 ### Team 2 - The Server
 
@@ -47,4 +47,3 @@ And the following commands to test the client:
 
 `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes # fill in the prompts
 openssl s_server -key key.pem -cert cert.pem -accept 1337`
-
