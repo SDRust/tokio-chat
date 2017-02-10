@@ -8,5 +8,5 @@ build = "build.rs"
 serde_codegen = "0.8"
 
 [dependencies]
-serde = "*"
+serde = "0.8"
 serde_json = "0.8"
