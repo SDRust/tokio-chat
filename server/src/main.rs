@@ -28,6 +28,9 @@ use futures::stream::Stream;
 use tokio_core::io::{copy, Io};
 use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
+use std::cell::RefCell;
+
+type ConnectionList = RefCell<Vec<tokio_core::io::WriteHalf<tokio_core::net::TcpStream>>>;
 
 fn main() {
     // Allow passing an address to listen on as the first argument of this
@@ -36,6 +39,7 @@ fn main() {
     let addr = env::args().nth(1).unwrap_or("127.0.0.1:1337".to_string());
     let addr = addr.parse::<SocketAddr>().unwrap();
 
+    let connection_list : ConnectionList = RefCell::new(vec![]);
     // First up we'll create the event loop that's going to drive this server.
     // This is done by creating an instance of the `Core` type, tokio-core's
     // event loop. Most functions in tokio-core return an `io::Result`, and
@@ -87,7 +91,10 @@ fn main() {
         // resolved when the copying operation is complete, resolving to the
         // amount of data that was copied.
         let (reader, writer) = socket.split();
-        let amt = copy(reader, writer);
+
+        connection_list.borrow_mut().push(writer);
+
+        //let amt = coq(reader, writer);
 
         // After our copy operation is complete we just print out some helpful
         // information.
