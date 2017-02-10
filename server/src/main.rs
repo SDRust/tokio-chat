@@ -1,94 +1,129 @@
+//! An "hello world" echo server with tokio-core
+//!
+//! This server will create a TCP listener, accept connections in a loop, and
+//! simply write back everything that's read off of each TCP connection. Each
+//! TCP connection is processed concurrently with all other TCP connections, and
+//! each connection will have its own buffer that it's reading in/out of.
+//!
+//! To see this server in action, you can run this in one terminal:
+//!
+//!     cargo run --example echo
+//!
+//! and in another terminal you can run:
+//!
+//!     cargo run --example connect 127.0.0.1:8080
+//!
+//! Each line you type in to the `connect` terminal should be echo'd back to
+//! you! If you open up multiple terminals running the `connect` example you
+//! should be able to see them all make progress simultaneously.
+
 extern crate futures;
 extern crate tokio_core;
-extern crate tokio_proto;
-extern crate tokio_service;
 
-use std::io;
-use std::str;
-use tokio_core::io::{Codec, EasyBuf};
+use std::env;
+use std::net::SocketAddr;
 
-pub struct LineCodec;
-
-impl Codec for LineCodec {
-    type In = String;
-    type Out = String;
-
-    fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
-        if let Some(i) = buf.as_slice().iter().position(|&b| b == b'\n') {
-            // remove the serialized frame from the buffer.
-            let line = buf.drain_to(i);
-
-            // Also remove the '\n'
-            buf.drain_to(1);
-
-            // Turn this data into a UTF string and return it in a Frame.
-            match str::from_utf8(line.as_slice()) {
-                Ok(s) => Ok(Some(s.to_string())),
-                Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid UTF-8")),
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn encode(&mut self, msg: String, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.extend(msg.as_bytes());
-        buf.push(b'\n');
-        Ok(())
-    }
-}
-
-use tokio_proto::pipeline::ServerProto;
-
-pub struct LineProto;
-
-use tokio_core::io::{Io, Framed};
-
-impl<T: Io + 'static> ServerProto<T> for LineProto {
-    /// For this protocol style, `Request` matches the codec `In` type
-    type Request = String;
-
-    /// For this protocol style, `Response` matches the coded `Out` type
-    type Response = String;
-
-    /// A bit of boilerplate to hook in the codec:
-    type Transport = Framed<T, LineCodec>;
-    type BindTransport = Result<Self::Transport, io::Error>;
-    fn bind_transport(&self, io: T) -> Self::BindTransport {
-        Ok(io.framed(LineCodec))
-    }
-}
-
-use tokio_service::Service;
-pub struct Echo;
-use futures::{future, Future, BoxFuture};
-impl Service for Echo {
-    // These types must match the corresponding protocol types:
-    type Request = String;
-    type Response = String;
-
-    // For non-streaming protocols, service errors are always io::Error
-    type Error = io::Error;
-
-    // The future for computing the response; box it for simplicity.
-    type Future = BoxFuture<Self::Response, Self::Error>;
-
-    // Produce a future for computing a response from a request.
-    fn call(&self, req: Self::Request) -> Self::Future {
-        // In this case, the response is immediate.
-        future::ok(req).boxed()
-    }
-}
-use tokio_proto::TcpServer;
+use futures::Future;
+use futures::stream::Stream;
+use tokio_core::io::{copy, Io};
+use tokio_core::net::TcpListener;
+use tokio_core::reactor::Core;
 
 fn main() {
-    // Specify the localhost address
-    let addr = "0.0.0.0:1337".parse().unwrap();
+    // Allow passing an address to listen on as the first argument of this
+    // program, but otherwise we'll just set up our TCP listener on
+    // 127.0.0.1:8080 for connections.
+    let addr = env::args().nth(1).unwrap_or("127.0.0.1:1337".to_string());
+    let addr = addr.parse::<SocketAddr>().unwrap();
 
-    // The builder requires a protocol and an address
-    let server = TcpServer::new(LineProto, addr);
+    // First up we'll create the event loop that's going to drive this server.
+    // This is done by creating an instance of the `Core` type, tokio-core's
+    // event loop. Most functions in tokio-core return an `io::Result`, and
+    // `Core::new` is no exception. For this example, though, we're mostly just
+    // ignoring errors, so we unwrap the return value.
+    //
+    // After the event loop is created we acquire a handle to it through the
+    // `handle` method. With this handle we'll then later be able to create I/O
+    // objects and spawn futures.
+    let mut core = Core::new().unwrap();
+    let handle = core.handle();
 
-    // We provide a way to *instantiate* the service for each new
-    // connection; here, we just immediately return a new instance.
-    server.serve(|| Ok(Echo));
+    // Next up we create a TCP listener which will listen for incoming
+    // connections. This TCP listener is bound to the address we determined
+    // above and must be associated with an event loop, so we pass in a handle
+    // to our event loop. After the socket's created we inform that we're ready
+    // to go and start accepting connections.
+    let socket = TcpListener::bind(&addr, &handle).unwrap();
+    println!("Listening on: {}", addr);
+
+    // Here we convert the `TcpListener` to a stream of incoming connections
+    // with the `incoming` method. We then define how to process each element in
+    // the stream with the `for_each` method.
+    //
+    // This combinator, defined on the `Stream` trait, will allow us to define a
+    // computation to happen for all items on the stream (in this case TCP
+    // connections made to the server).  The return value of the `for_each`
+    // method is itself a future representing processing the entire stream of
+    // connections, and ends up being our server.
+    let done = socket.incoming().for_each(move |(socket, addr)| {
+
+        // Once we're inside this closure this represents an accepted client
+        // from our server. The `socket` is the client connection and `addr` is
+        // the remote address of the client (similar to how the standard library
+        // operates).
+        //
+        // We just want to copy all data read from the socket back onto the
+        // socket itself (e.g. "echo"). We can use the standard `io::copy`
+        // combinator in the `tokio-core` crate to do precisely this!
+        //
+        // The `copy` function takes two arguments, where to read from and where
+        // to write to. We only have one argument, though, with `socket`.
+        // Luckily there's a method, `Io::split`, which will split an Read/Write
+        // stream into its two halves. This operation allows us to work with
+        // each stream independently, such as pass them as two arguments to the
+        // `copy` function.
+        //
+        // The `copy` function then returns a future, and this future will be
+        // resolved when the copying operation is complete, resolving to the
+        // amount of data that was copied.
+        let (reader, writer) = socket.split();
+        let amt = copy(reader, writer);
+
+        // After our copy operation is complete we just print out some helpful
+        // information.
+        let msg = amt.then(move |result| {
+            match result {
+                Ok(amt) => println!("wrote {} bytes to {}", amt, addr),
+                Err(e) => println!("error on {}: {}", addr, e),
+            }
+
+            Ok(())
+        });
+
+        // And this is where much of the magic of this server happens. We
+        // crucially want all clients to make progress concurrently, rather than
+        // blocking one on completion of another. To achieve this we use the
+        // `spawn` function on `Handle` to essentially execute some work in the
+        // background.
+        //
+        // This function will transfer ownership of the future (`msg` in this
+        // case) to the event loop that `handle` points to. The event loop will
+        // then drive the future to completion.
+        //
+        // Essentially here we're spawning a new task to run concurrently, which
+        // will allow all of our clients to be processed concurrently.
+        handle.spawn(msg);
+
+        Ok(())
+    });
+
+    // And finally now that we've define what our server is, we run it! We
+    // didn't actually do much I/O up to this point and this `Core::run` method
+    // is responsible for driving the entire server to completion.
+    //
+    // The `run` method will return the result of the future that it's running,
+    // but in our case the `done` future won't ever finish because a TCP
+    // listener is never done accepting clients. That basically just means that
+    // we're going to be running the server until it's killed (e.g. ctrl-c).
+    core.run(done).unwrap();
 }
